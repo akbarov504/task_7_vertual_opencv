@@ -2,14 +2,13 @@ import cv2
 import time
 import threading
 
+OUT_URL = "udp://127.0.0.1:23000"
+IN_URL = "udp://127.0.0.1:23001"
 
-OUT_DEVICE = "/dev/v4l/by-path/platform-xhci-hcd.0.auto-usb-0:1.3:1.0-video-index0"
-IN_DEVICE = "/dev/v4l/by-path/platform-xhci-hcd.10.auto-usb-0:1:1.0-video-index0"
 
-
-class CameraStream:
-    def __init__(self, device, name):
-        self.device = device
+class StreamReader:
+    def __init__(self, url, name):
+        self.url = url
         self.name = name
         self.cap = None
         self.frame = None
@@ -26,19 +25,13 @@ class CameraStream:
             except Exception:
                 pass
 
-        self.cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
+        self.cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
 
         if not self.cap.isOpened():
-            print(f"[ERROR] {self.name} ochilmadi: {self.device}")
+            print(f"[ERROR] {self.name} stream ochilmadi: {self.url}")
             return False
 
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        self.cap.set(cv2.CAP_PROP_FPS, 15)
-
-        print(f"[INFO] {self.name} ochildi: {self.device}")
+        print(f"[INFO] {self.name} stream ochildi")
         return True
 
     def start(self):
@@ -49,13 +42,11 @@ class CameraStream:
     def update(self):
         while self.running:
             if self.cap is None or not self.cap.isOpened():
-                ok = self.open()
-                if not ok:
+                if not self.open():
                     time.sleep(0.5)
                     continue
 
             ret, frame = self.cap.read()
-
             if not ret:
                 print(f"[WARN] {self.name} reconnect...")
                 try:
@@ -71,7 +62,7 @@ class CameraStream:
                 dt = now - self.last_frame_time
                 if dt > 0:
                     instant_fps = 1.0 / dt
-                    self.fps = (self.fps * 0.85) + (instant_fps * 0.15)
+                    self.fps = self.fps * 0.85 + instant_fps * 0.15
             self.last_frame_time = now
 
             with self.lock:
@@ -87,7 +78,6 @@ class CameraStream:
         self.running = False
         if self.thread is not None:
             self.thread.join(timeout=1)
-
         if self.cap is not None:
             try:
                 self.cap.release()
@@ -95,47 +85,33 @@ class CameraStream:
                 pass
 
 
-out_cam = CameraStream(OUT_DEVICE, "OUT")
-in_cam = CameraStream(IN_DEVICE, "IN")
+out_stream = StreamReader(OUT_URL, "OUT")
+in_stream = StreamReader(IN_URL, "IN")
 
-out_cam.start()
-in_cam.start()
+out_stream.start()
+in_stream.start()
 
-print("[INFO] OUT va IN realtime mode ishlayapti. Chiqish uchun q bosing.")
+print("[INFO] UDP realtime stream ishlayapti. Chiqish uchun q bosing.")
 
 try:
     while True:
-        frame_out = out_cam.read_latest()
-        frame_in = in_cam.read_latest()
+        frame_out = out_stream.read_latest()
+        frame_in = in_stream.read_latest()
 
         if frame_out is not None:
-            cv2.putText(
-                frame_out,
-                f"OUT FPS: {out_cam.fps:.1f}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0),
-                2
-            )
-            cv2.imshow("OUT REALTIME", frame_out)
+            cv2.putText(frame_out, f"OUT FPS: {out_stream.fps:.1f}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            cv2.imshow("OUT UDP REALTIME", frame_out)
 
         if frame_in is not None:
-            cv2.putText(
-                frame_in,
-                f"IN FPS: {in_cam.fps:.1f}",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0),
-                2
-            )
-            cv2.imshow("IN REALTIME", frame_in)
+            cv2.putText(frame_in, f"IN FPS: {in_stream.fps:.1f}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            cv2.imshow("IN UDP REALTIME", frame_in)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
 
 finally:
-    out_cam.stop()
-    in_cam.stop()
+    out_stream.stop()
+    in_stream.stop()
     cv2.destroyAllWindows()
