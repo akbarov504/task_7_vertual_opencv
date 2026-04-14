@@ -7,7 +7,6 @@ from multiprocessing import shared_memory
 SHM_WIDTH = 1280
 SHM_HEIGHT = 720
 SHM_CHANNELS = 3
-SHM_FPS = 10
 
 
 class SharedFrameReader:
@@ -72,8 +71,6 @@ class SharedFrameReader:
 def main():
     out_reader = SharedFrameReader("out_camera_shm", SHM_WIDTH, SHM_HEIGHT, SHM_CHANNELS)
     in_reader = SharedFrameReader("in_camera_shm", SHM_WIDTH, SHM_HEIGHT, SHM_CHANNELS)
-
-    print("[INFO] Shared memory reader start...")
 
     while not out_reader.connect():
         print("[WAIT] out_camera_shm kutilmoqda...")
