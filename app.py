@@ -19,10 +19,14 @@ class CameraStream:
 
         self.last_frame_time = None
         self.fps = 0.0
+        self.opened_once = False
 
     def open(self):
         if self.cap is not None:
-            self.cap.release()
+            try:
+                self.cap.release()
+            except Exception:
+                pass
 
         self.cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
 
@@ -30,12 +34,15 @@ class CameraStream:
             print(f"[ERROR] {self.name} ochilmadi: {self.device}")
             return False
 
-        # Bufferni maksimal kamaytirish
+        # Bufferni minimal qilish
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        # Ba'zi device larda foyda beradi
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        # Past latency uchun resolutionni pasaytirib olishga urinib ko'ramiz
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
+        self.cap.set(cv2.CAP_PROP_FPS, 10)
 
+        self.opened_once = True
         print(f"[INFO] {self.name} ochildi: {self.device}")
         return True
 
@@ -49,10 +56,15 @@ class CameraStream:
             if self.cap is None or not self.cap.isOpened():
                 ok = self.open()
                 if not ok:
-                    time.sleep(1)
+                    time.sleep(0.5)
                     continue
 
+            # Eski frame'larni tashlab yuborish uchun 2 marta read qilamiz
             ret, frame = self.cap.read()
+            if ret:
+                ret2, frame2 = self.cap.read()
+                if ret2:
+                    frame = frame2
 
             if not ret:
                 print(f"[WARN] {self.name} reconnect...")
@@ -61,7 +73,7 @@ class CameraStream:
                 except Exception:
                     pass
                 self.cap = None
-                time.sleep(0.5)
+                time.sleep(0.3)
                 continue
 
             now = time.time()
@@ -69,8 +81,7 @@ class CameraStream:
                 dt = now - self.last_frame_time
                 if dt > 0:
                     instant_fps = 1.0 / dt
-                    # smoothing
-                    self.fps = (self.fps * 0.9) + (instant_fps * 0.1)
+                    self.fps = (self.fps * 0.85) + (instant_fps * 0.15)
             self.last_frame_time = now
 
             with self.lock:
@@ -84,11 +95,15 @@ class CameraStream:
 
     def stop(self):
         self.running = False
+
         if self.thread is not None:
             self.thread.join(timeout=1)
 
         if self.cap is not None:
-            self.cap.release()
+            try:
+                self.cap.release()
+            except Exception:
+                pass
 
 
 out_cam = CameraStream(OUT_DEVICE, "OUT")
@@ -97,7 +112,7 @@ in_cam = CameraStream(IN_DEVICE, "IN")
 out_cam.start()
 in_cam.start()
 
-print("[INFO] OUT va IN ishlayapti. Chiqish uchun q bosing.")
+print("[INFO] OUT va IN realtime mode ishlayapti. Chiqish uchun q bosing.")
 
 try:
     while True:
@@ -114,7 +129,7 @@ try:
                 (0, 255, 0),
                 2
             )
-            cv2.imshow("OUT Virtual Cam", frame_out)
+            cv2.imshow("OUT Realtime", frame_out)
 
         if frame_in is not None:
             cv2.putText(
@@ -126,7 +141,7 @@ try:
                 (0, 255, 0),
                 2
             )
-            cv2.imshow("IN Virtual Cam", frame_in)
+            cv2.imshow("IN Realtime", frame_in)
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
