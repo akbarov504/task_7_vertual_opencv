@@ -1,110 +1,169 @@
-import time
 import cv2
-import numpy as np
-from multiprocessing import shared_memory
+import time
+import threading
 
 
-SHM_WIDTH = 1280
-SHM_HEIGHT = 720
-SHM_CHANNELS = 3
+OUT_DEVICE = "/dev/video40"
+IN_DEVICE  = "/dev/video41"
 
 
-class SharedFrameReader:
-    def __init__(self, shm_name, width, height, channels):
-        self.shm_name = shm_name
-        self.width = width
-        self.height = height
-        self.channels = channels
-        self.frame_size = width * height * channels
-        self.total_size = 16 + self.frame_size
+class CameraStream:
+    def __init__(self, device, name):
+        self.device = device
+        self.name   = name
+        self.cap    = None
+        self.frame  = None
+        self.lock   = threading.Lock()
+        self.running = False
+        self.thread  = None
 
-        self.shm = None
-        self.buf = None
-        self.last_ts = 0
-        self.prev_time = None
-        self.fps = 0.0
+        self.last_frame_time = None
+        self.fps             = 0.0
+        self.opened_once     = False
 
-    def connect(self):
-        try:
-            self.shm = shared_memory.SharedMemory(name=self.shm_name)
-            self.buf = self.shm.buf
-            print(f"[INFO] {self.shm_name} ga ulandi")
-            return True
-        except FileNotFoundError:
+    def open(self):
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+
+        self.cap = cv2.VideoCapture(self.device, cv2.CAP_V4L2)
+
+        if not self.cap.isOpened():
+            print(f"[ERROR] {self.name} ochilmadi: {self.device}")
             return False
 
-    def read(self):
-        if self.buf is None:
-            return None
+        # MJPEG format — decode tezroq, kanalda ham MJPEG keladi
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 
-        if self.buf[0] != 1:
-            return None
+        # 1280x720 @ 15fps
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.cap.set(cv2.CAP_PROP_FPS, 15)
 
-        ts = int.from_bytes(self.buf[8:16], byteorder="little", signed=False)
-        if ts == self.last_ts:
-            return None
+        # Kernel buffer minimalni 1 ga set qil
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        arr = np.ndarray(
-            (self.height, self.width, self.channels),
-            dtype=np.uint8,
-            buffer=self.buf[16:]
-        )
+        self.opened_once = True
+        print(f"[INFO] {self.name} ochildi: {self.device}")
+        return True
 
-        frame = arr.copy()
-        self.last_ts = ts
+    def start(self):
+        self.running = True
+        self.thread  = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
 
-        now = time.time()
-        if self.prev_time is not None:
-            dt = now - self.prev_time
-            if dt > 0:
-                instant_fps = 1.0 / dt
-                self.fps = self.fps * 0.85 + instant_fps * 0.15
-        self.prev_time = now
+    def update(self):
+        TARGET_INTERVAL = 1.0 / 15  # 15 fps => 66.6ms
 
-        return frame
+        while self.running:
+            # --- Device yo'q yoki yopiq bo'lsa qayta ochish ---
+            if self.cap is None or not self.cap.isOpened():
+                ok = self.open()
+                if not ok:
+                    time.sleep(0.5)
+                    continue
 
-    def close(self):
-        if self.shm is not None:
-            self.shm.close()
+            loop_start = time.time()
+
+            # --- Faqat bir marta o'qiymiz (2x read delay qo'shadi) ---
+            ret, frame = self.cap.read()
+
+            if not ret:
+                print(f"[WARN] {self.name} reconnect...")
+                try:
+                    self.cap.release()
+                except Exception:
+                    pass
+                self.cap = None
+                time.sleep(0.3)
+                continue
+
+            # --- FPS hisoblash (exponential moving average) ---
+            now = time.time()
+            if self.last_frame_time is not None:
+                dt = now - self.last_frame_time
+                if dt > 0:
+                    instant_fps = 1.0 / dt
+                    self.fps = (self.fps * 0.85) + (instant_fps * 0.15)
+            self.last_frame_time = now
+
+            # --- Eng yangi frame ni saqlash ---
+            with self.lock:
+                self.frame = frame
+
+            # --- Buffer to'planmasligi uchun qolgan vaqtni uxlash ---
+            elapsed    = time.time() - loop_start
+            sleep_time = TARGET_INTERVAL - elapsed
+            if sleep_time > 0.002:
+                time.sleep(sleep_time)
+
+    def read_latest(self):
+        with self.lock:
+            if self.frame is None:
+                return None
+            return self.frame.copy()
+
+    def stop(self):
+        self.running = False
+
+        if self.thread is not None:
+            self.thread.join(timeout=1)
+
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
 
 
-def main():
-    out_reader = SharedFrameReader("out_camera_shm", SHM_WIDTH, SHM_HEIGHT, SHM_CHANNELS)
-    in_reader = SharedFrameReader("in_camera_shm", SHM_WIDTH, SHM_HEIGHT, SHM_CHANNELS)
+# ── Streamlarni boshlash ──────────────────────────────────────────────────────
 
-    while not out_reader.connect():
-        print("[WAIT] out_camera_shm kutilmoqda...")
-        time.sleep(1)
+out_cam = CameraStream(OUT_DEVICE, "OUT")
+in_cam  = CameraStream(IN_DEVICE,  "IN")
 
-    while not in_reader.connect():
-        print("[WAIT] in_camera_shm kutilmoqda...")
-        time.sleep(1)
+out_cam.start()
+in_cam.start()
 
-    try:
-        while True:
-            frame_out = out_reader.read()
-            frame_in = in_reader.read()
+print("[INFO] OUT va IN realtime mode ishlayapti (1280x720 @ 15fps).")
+print("[INFO] Chiqish uchun 'q' bosing.")
 
-            if frame_out is not None:
-                cv2.putText(frame_out, f"OUT FPS: {out_reader.fps:.1f}", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                cv2.imshow("OUT SHM REALTIME", frame_out)
+try:
+    while True:
+        frame_out = out_cam.read_latest()
+        frame_in  = in_cam.read_latest()
 
-            if frame_in is not None:
-                cv2.putText(frame_in, f"IN FPS: {in_reader.fps:.1f}", (10, 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                cv2.imshow("IN SHM REALTIME", frame_in)
+        if frame_out is not None:
+            cv2.putText(
+                frame_out,
+                f"OUT  {out_cam.fps:.1f} fps",
+                (10, 36),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.imshow("OUT Realtime", frame_out)
 
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+        if frame_in is not None:
+            cv2.putText(
+                frame_in,
+                f"IN   {in_cam.fps:.1f} fps",
+                (10, 36),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.imshow("IN Realtime", frame_in)
 
-            time.sleep(0.001)
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            break
 
-    finally:
-        out_reader.close()
-        in_reader.close()
-        cv2.destroyAllWindows()
-
-
-if __name__ == "__main__":
-    main()
+finally:
+    out_cam.stop()
+    in_cam.stop()
+    cv2.destroyAllWindows()
