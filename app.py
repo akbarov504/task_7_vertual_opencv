@@ -4,8 +4,8 @@ import numpy as np
 from multiprocessing import shared_memory
 
 
-SHM_WIDTH = 640
-SHM_HEIGHT = 480
+SHM_WIDTH = 1280
+SHM_HEIGHT = 720
 SHM_CHANNELS = 3
 SHM_FPS = 10
 
